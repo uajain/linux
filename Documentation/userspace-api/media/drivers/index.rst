@@ -32,6 +32,7 @@ For more details see the file COPYING in the source distribution of Linux.
 	:numbered:
 
 	aspeed-video
+	bcm2835-isp
 	ccs
 	cx2341x-uapi
 	dw100
