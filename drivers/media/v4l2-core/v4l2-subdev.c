@@ -1787,7 +1787,8 @@ int v4l2_subdev_routing_validate(struct v4l2_subdev *sd,
 
 		/* Validate the sink and source pad numbers. */
 		if (route->sink_pad >= sd->entity.num_pads ||
-		    !(sd->entity.pads[route->sink_pad].flags & MEDIA_PAD_FL_SINK)) {
+		    !(sd->entity.pads[route->sink_pad].flags &
+		      MEDIA_PAD_FL_SINK)) {
 			dev_dbg(sd->dev, "route %u sink (%u) is not a sink pad\n",
 				i, route->sink_pad);
 			goto out;
