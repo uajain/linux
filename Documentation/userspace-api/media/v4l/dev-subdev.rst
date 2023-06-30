@@ -551,6 +551,26 @@ A stream at a specific point in the media pipeline is identified by the
 sub-device and a (pad, stream) pair. For sub-devices that do not support
 multiplexed streams the 'stream' field is always 0.
 
+.. _v4l2-subdev-source-routes:
+
+Source routes
+^^^^^^^^^^^^^
+
+Cases where a single sub-device pad is a source of multiple streams are special
+as there is no external sink pad for such a route. In those cases, the sources
+of the streams are indicated by source routes that have an internal source pad
+as the sink pad of such a route. Internal source pads have the
+:ref:`MEDIA_PAD_FL_INTERNAL <MEDIA-PAD-FL-INTERNAL>` and ``MEDIA_PAD_FL_SINK``
+pad flags set.
+
+Internal source pads have all the properties of a sink pad in such case,
+including formats and selections. The format in this case is the source format
+of the stream. An internal pad always has a single stream only (0).
+
+Generally source routes are not modifiable but they can be activated and
+deactivated using the :ref:`V4L2_SUBDEV_ROUTE_FL_ACTIVE
+<v4l2-subdev-routing-flags>` flag, depending on driver capabilities.
+
 Interaction between routes, streams, formats and selections
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
