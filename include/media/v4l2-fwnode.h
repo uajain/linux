@@ -186,6 +186,7 @@ enum v4l2_fwnode_bus_type {
 
 /**
  * v4l2_fwnode_endpoint_parse() - parse all fwnode node properties
+ * @dev: the 
  * @fwnode: pointer to the endpoint's fwnode handle
  * @vep: pointer to the V4L2 fwnode data structure
  *
@@ -225,7 +226,8 @@ enum v4l2_fwnode_bus_type {
  *	   %-EINVAL on parsing failure
  *	   %-ENXIO on mismatching bus types
  */
-int v4l2_fwnode_endpoint_parse(struct fwnode_handle *fwnode,
+int v4l2_fwnode_endpoint_parse(struct device *dev,
+			       struct fwnode_handle *fwnode,
 			       struct v4l2_fwnode_endpoint *vep);
 
 /**
@@ -283,7 +285,8 @@ void v4l2_fwnode_endpoint_free(struct v4l2_fwnode_endpoint *vep);
  *	   %-EINVAL on parsing failure
  *	   %-ENXIO on mismatching bus types
  */
-int v4l2_fwnode_endpoint_alloc_parse(struct fwnode_handle *fwnode,
+int v4l2_fwnode_endpoint_alloc_parse(struct device *dev,
+				     struct fwnode_handle *fwnode,
 				     struct v4l2_fwnode_endpoint *vep);
 
 /**

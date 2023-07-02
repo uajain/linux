@@ -2286,7 +2286,7 @@ static int unicam_async_nf_init(struct unicam_device *unicam)
 		return -ENODEV;
 	}
 
-	ret = v4l2_fwnode_endpoint_parse(ep_handle, &ep);
+	ret = v4l2_fwnode_endpoint_parse(unicam->dev, ep_handle, &ep);
 	if (ret) {
 		dev_err(unicam->dev, "Failed to parse endpoint: %d\n", ret);
 		goto error;
