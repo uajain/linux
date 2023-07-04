@@ -681,12 +681,12 @@ static const struct v4l2_ctrl_ops imx219_ctrl_ops = {
 	.s_ctrl = imx219_set_ctrl,
 };
 
-static void imx219_embedded_data_fmt(struct v4l2_subdev *sd,
-				     struct v4l2_subdev_state *state,
+static void imx219_embedded_data_fmt(struct v4l2_subdev_state *state,
 				     struct v4l2_mbus_framefmt *fmt)
 {
-	struct v4l2_mbus_framefmt *img_fmt = v4l2_subdev_get_pad_format(sd,
-						state, IMX219_SINK_IMAGE_PAD);
+	struct v4l2_mbus_framefmt *img_fmt =
+		v4l2_subdev_state_get_stream_format(state,
+						    IMX219_SINK_IMAGE_PAD, 0);
 
 	fmt->width = IMX219_EMBEDDED_DATA_WIDTH;
 	fmt->height = IMX219_EMBEDDED_DATA_HEIGHT;
@@ -727,28 +727,78 @@ static void imx219_update_pad_format(struct imx219 *imx219,
 	fmt->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(fmt->colorspace);
 }
 
+static int __imx219_subdev_set_routing(struct v4l2_subdev *sd,
+				       struct v4l2_subdev_state *state,
+				       struct v4l2_subdev_krouting *routing)
+{
+	struct imx219 *imx219 = to_imx219(sd);
+	struct v4l2_subdev_route *route;
+	int ret;
+
+	ret = v4l2_subdev_routing_validate(sd, routing,
+					   V4L2_SUBDEV_ROUTING_ONLY_1_TO_1);
+	if (ret)
+		return ret;
+
+	ret = v4l2_subdev_set_routing(sd, state, routing);
+	if (ret)
+		return ret;
+
+	for_each_active_route(&state->routing, route) {
+		struct v4l2_mbus_framefmt def_fmt;
+		struct v4l2_mbus_framefmt *fmt;
+
+		if (route->sink_pad == IMX219_SINK_IMAGE_PAD)
+			imx219_update_pad_format(imx219, &supported_modes[0],
+						 &def_fmt,
+						 MEDIA_BUS_FMT_SRGGB10_1X10);
+		else
+			imx219_embedded_data_fmt(state, &def_fmt);
+
+		fmt = v4l2_subdev_state_get_stream_format(state, route->sink_pad,
+							  route->sink_stream);
+		*fmt = def_fmt;
+
+		fmt = v4l2_subdev_state_get_stream_format(state, route->source_pad,
+							  route->source_stream);
+		*fmt = def_fmt;
+	}
+
+	return 0;
+}
+
 static int imx219_init_cfg(struct v4l2_subdev *sd,
 			   struct v4l2_subdev_state *state)
 {
-	struct imx219 *imx219 = to_imx219(sd);
-	struct v4l2_mbus_framefmt *format;
+	struct v4l2_subdev_route routes[] = {
+		{
+			.sink_pad = IMX219_SINK_IMAGE_PAD,
+			.sink_stream = 0,
+			.source_pad = IMX219_SOURCE_PAD,
+			.source_stream = 0,
+			.flags = V4L2_SUBDEV_ROUTE_FL_ACTIVE,
+		},
+		{
+			.sink_pad = IMX219_SINK_EMBEDDED_PAD,
+			.sink_stream = 0,
+			.source_pad = IMX219_SOURCE_PAD,
+			.source_stream = 1,
+			.flags = V4L2_SUBDEV_ROUTE_FL_ACTIVE,
+		},
+	};
+	struct v4l2_subdev_krouting routing = {
+		.num_routes = ARRAY_SIZE(routes),
+		.routes = routes,
+	};
 	struct v4l2_rect *try_crop;
+	int ret;
 
-	/* Initialize formats on image pads */
-	format = v4l2_subdev_get_pad_format(sd, state, IMX219_SOURCE_PAD);
-	imx219_update_pad_format(imx219, &supported_modes[0], format,
-				 MEDIA_BUS_FMT_SRGGB10_1X10);
-
-	format = v4l2_subdev_get_pad_format(sd, state, IMX219_SINK_IMAGE_PAD);
-	imx219_update_pad_format(imx219, &supported_modes[0], format,
-				 MEDIA_BUS_FMT_SRGGB10_1X10);
-
-	/* Initialize format on the embedded data sink pad */
-	format = v4l2_subdev_get_pad_format(sd, state, IMX219_SINK_EMBEDDED_PAD);
-	imx219_embedded_data_fmt(sd, state, format);
+	ret = __imx219_subdev_set_routing(sd, state, &routing);
+	if (ret)
+		return ret;
 
 	/* Initialize try_crop rectangle. */
-	try_crop = v4l2_subdev_get_pad_crop(sd, state, IMX219_SOURCE_PAD);
+	try_crop = v4l2_subdev_state_get_stream_crop(state, IMX219_SOURCE_PAD, 0);
 	try_crop->top = IMX219_PIXEL_ARRAY_TOP;
 	try_crop->left = IMX219_PIXEL_ARRAY_LEFT;
 	try_crop->width = IMX219_PIXEL_ARRAY_WIDTH;
@@ -775,8 +825,8 @@ static int imx219_enum_mbus_code(struct v4l2_subdev *sd,
 		 * as the embedded data format bit depth depends on the image
 		 * format ? List only the available one for the now.
 		 */
-		fmt = v4l2_subdev_get_pad_format(sd, sd_state,
-						 IMX219_SINK_EMBEDDED_PAD);
+		fmt = v4l2_subdev_state_get_stream_format(sd_state,
+						 IMX219_SINK_EMBEDDED_PAD, 0);
 		code->code = fmt->code;
 
 		return 0;
@@ -836,9 +886,16 @@ static int imx219_set_pad_format(struct v4l2_subdev *sd,
 	 * and cannot be set directly.
 	 */
 	if (fmt->pad == IMX219_SINK_EMBEDDED_PAD) {
-		format = v4l2_subdev_get_pad_format(sd, sd_state,
-						    IMX219_SINK_EMBEDDED_PAD);
-		imx219_embedded_data_fmt(sd, sd_state, format);
+		format = v4l2_subdev_state_get_stream_format(sd_state, fmt->pad,
+							     fmt->stream);
+		imx219_embedded_data_fmt(sd_state, format);
+
+		/* Propagate to the other end. */
+		format = v4l2_subdev_state_get_opposite_stream_format(sd_state,
+								      fmt->pad,
+								      fmt->stream);
+		imx219_embedded_data_fmt(sd_state, format);
+
 		fmt->format = *format;
 
 		return 0;
@@ -884,21 +941,36 @@ static int imx219_set_pad_format(struct v4l2_subdev *sd,
 	 * pad#0 is the only existing pad. So for now, setting a format on the
 	 * sink or on the source pad is equivalent.
 	 */
-	format = v4l2_subdev_get_pad_format(sd, sd_state, IMX219_SOURCE_PAD);
+	format = v4l2_subdev_state_get_stream_format(sd_state, fmt->pad,
+						     fmt->stream);
 	*format = fmt->format;
 
-	format = v4l2_subdev_get_pad_format(sd, sd_state, IMX219_SINK_IMAGE_PAD);
+	format = v4l2_subdev_state_get_opposite_stream_format(sd_state,
+							      fmt->pad,
+							      fmt->stream);
 	*format = fmt->format;
 
 	/*
 	 * The embedded data format bit-depth depends on the image format
 	 * bit depth.
 	 */
-	format = v4l2_subdev_get_pad_format(sd, sd_state,
-					    IMX219_SINK_EMBEDDED_PAD);
-	imx219_embedded_data_fmt(sd, sd_state, format);
+	format = v4l2_subdev_state_get_stream_format(sd_state,
+						     IMX219_SINK_EMBEDDED_PAD, 0);
+	imx219_embedded_data_fmt(sd_state, format);
+
+	format = v4l2_subdev_state_get_opposite_stream_format(sd_state,
+						     IMX219_SINK_EMBEDDED_PAD, 0);
+	imx219_embedded_data_fmt(sd_state, format);
 
 	return 0;
+}
+
+static int imx219_subdev_set_routing(struct v4l2_subdev *sd,
+				     struct v4l2_subdev_state *state,
+				     enum v4l2_subdev_format_whence which,
+				     struct v4l2_subdev_krouting *routing)
+{
+	return __imx219_subdev_set_routing(sd, state, routing);
 }
 
 static int imx219_set_framefmt(struct imx219 *imx219,
@@ -963,7 +1035,8 @@ static int imx219_get_selection(struct v4l2_subdev *sd,
 
 	switch (sel->target) {
 	case V4L2_SEL_TGT_CROP: {
-		sel->r = *v4l2_subdev_get_pad_crop(sd, sd_state, 0);
+		sel->r = *v4l2_subdev_state_get_stream_crop(sd_state,
+							    IMX219_SOURCE_PAD, 0);
 		return 0;
 	}
 
@@ -1029,7 +1102,7 @@ static int imx219_start_streaming(struct imx219 *imx219,
 		goto err_rpm_put;
 	}
 
-	format = v4l2_subdev_get_pad_format(&imx219->sd, state, 0);
+	format = v4l2_subdev_state_get_stream_format(state, IMX219_SOURCE_PAD, 0);
 	ret = imx219_set_framefmt(imx219, format);
 	if (ret) {
 		dev_err(&client->dev, "%s failed to set frame format: %d\n",
@@ -1247,6 +1320,7 @@ static const struct v4l2_subdev_pad_ops imx219_pad_ops = {
 	.set_fmt = imx219_set_pad_format,
 	.get_selection = imx219_get_selection,
 	.enum_frame_size = imx219_enum_frame_size,
+	.set_routing = imx219_subdev_set_routing,
 };
 
 static const struct v4l2_subdev_ops imx219_subdev_ops = {
@@ -1509,7 +1583,8 @@ static int imx219_probe(struct i2c_client *client)
 
 	/* Initialize subdev */
 	imx219->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
-			    V4L2_SUBDEV_FL_HAS_EVENTS;
+			    V4L2_SUBDEV_FL_HAS_EVENTS |
+			    V4L2_SUBDEV_FL_STREAMS;
 	imx219->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
 
 	/*
