@@ -130,6 +130,10 @@
 #define IMX219_PIXEL_ARRAY_WIDTH	3280U
 #define IMX219_PIXEL_ARRAY_HEIGHT	2464U
 
+/* Embedded metadata stream sizes */
+#define IMX219_EMBEDDED_DATA_WIDTH	16384
+#define IMX219_EMBEDDED_DATA_HEIGHT	1
+
 struct imx219_reg {
 	u16 address;
 	u8 val;
@@ -456,9 +460,16 @@ static const struct imx219_mode supported_modes[] = {
 	},
 };
 
+enum imx219_pad_ids {
+	IMX219_SOURCE_PAD,
+	IMX219_SINK_IMAGE_PAD,
+	IMX219_SINK_EMBEDDED_PAD,
+	IMX219_PADS_NUM,
+};
+
 struct imx219 {
 	struct v4l2_subdev sd;
-	struct media_pad pad;
+	struct media_pad pads[IMX219_PADS_NUM];
 
 	struct clk *xclk; /* system clock to IMX219 */
 	u32 xclk_freq;
@@ -670,6 +681,35 @@ static const struct v4l2_ctrl_ops imx219_ctrl_ops = {
 	.s_ctrl = imx219_set_ctrl,
 };
 
+static void imx219_embedded_data_fmt(struct v4l2_subdev *sd,
+				     struct v4l2_subdev_state *state,
+				     struct v4l2_mbus_framefmt *fmt)
+{
+	struct v4l2_mbus_framefmt *img_fmt = v4l2_subdev_get_pad_format(sd,
+						state, IMX219_SINK_IMAGE_PAD);
+
+	fmt->width = IMX219_EMBEDDED_DATA_WIDTH;
+	fmt->height = IMX219_EMBEDDED_DATA_HEIGHT;
+	fmt->field = V4L2_FIELD_NONE;
+
+	/* Embedded data bit-depth follows the image bit-depth. */
+	switch (img_fmt->code) {
+	case MEDIA_BUS_FMT_SRGGB10_1X10:
+	case MEDIA_BUS_FMT_SGRBG10_1X10:
+	case MEDIA_BUS_FMT_SGBRG10_1X10:
+	case MEDIA_BUS_FMT_SBGGR10_1X10:
+		fmt->code = MEDIA_BUS_FMT_META_10;
+		break;
+
+	case MEDIA_BUS_FMT_SRGGB8_1X8:
+	case MEDIA_BUS_FMT_SGRBG8_1X8:
+	case MEDIA_BUS_FMT_SGBRG8_1X8:
+	case MEDIA_BUS_FMT_SBGGR8_1X8:
+		fmt->code = MEDIA_BUS_FMT_META_8;
+		break;
+	}
+}
+
 static void imx219_update_pad_format(struct imx219 *imx219,
 				     const struct imx219_mode *mode,
 				     struct v4l2_mbus_framefmt *fmt, u32 code)
@@ -694,13 +734,21 @@ static int imx219_init_cfg(struct v4l2_subdev *sd,
 	struct v4l2_mbus_framefmt *format;
 	struct v4l2_rect *try_crop;
 
-	/* Initialize try_fmt */
-	format = v4l2_subdev_get_pad_format(sd, state, 0);
+	/* Initialize formats on image pads */
+	format = v4l2_subdev_get_pad_format(sd, state, IMX219_SOURCE_PAD);
 	imx219_update_pad_format(imx219, &supported_modes[0], format,
 				 MEDIA_BUS_FMT_SRGGB10_1X10);
 
+	format = v4l2_subdev_get_pad_format(sd, state, IMX219_SINK_IMAGE_PAD);
+	imx219_update_pad_format(imx219, &supported_modes[0], format,
+				 MEDIA_BUS_FMT_SRGGB10_1X10);
+
+	/* Initialize format on the embedded data sink pad */
+	format = v4l2_subdev_get_pad_format(sd, state, IMX219_SINK_EMBEDDED_PAD);
+	imx219_embedded_data_fmt(sd, state, format);
+
 	/* Initialize try_crop rectangle. */
-	try_crop = v4l2_subdev_get_pad_crop(sd, state, 0);
+	try_crop = v4l2_subdev_get_pad_crop(sd, state, IMX219_SOURCE_PAD);
 	try_crop->top = IMX219_PIXEL_ARRAY_TOP;
 	try_crop->left = IMX219_PIXEL_ARRAY_LEFT;
 	try_crop->width = IMX219_PIXEL_ARRAY_WIDTH;
@@ -714,6 +762,25 @@ static int imx219_enum_mbus_code(struct v4l2_subdev *sd,
 				 struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct imx219 *imx219 = to_imx219(sd);
+
+	if (code->pad == IMX219_SINK_EMBEDDED_PAD) {
+		struct v4l2_mbus_framefmt *fmt;
+
+		if (code->index)
+			return -EINVAL;
+
+		/*
+		 * FIXME should we list all the embedded data media bus formats
+		 * the sensor supports (8 and 10 bpp), or only the current one
+		 * as the embedded data format bit depth depends on the image
+		 * format ? List only the available one for the now.
+		 */
+		fmt = v4l2_subdev_get_pad_format(sd, sd_state,
+						 IMX219_SINK_EMBEDDED_PAD);
+		code->code = fmt->code;
+
+		return 0;
+	}
 
 	if (code->index >= (ARRAY_SIZE(imx219_mbus_formats) / 4))
 		return -EINVAL;
@@ -729,6 +796,16 @@ static int imx219_enum_frame_size(struct v4l2_subdev *sd,
 {
 	struct imx219 *imx219 = to_imx219(sd);
 	u32 code;
+
+	if (fse->pad == IMX219_SINK_EMBEDDED_PAD) {
+		if (fse->index)
+			return -EINVAL;
+
+		fse->min_width = fse->max_width = IMX219_EMBEDDED_DATA_WIDTH;
+		fse->min_height = fse->max_height = IMX219_EMBEDDED_DATA_HEIGHT;
+
+		return 0;
+	}
 
 	if (fse->index >= ARRAY_SIZE(supported_modes))
 		return -EINVAL;
@@ -752,6 +829,20 @@ static int imx219_set_pad_format(struct v4l2_subdev *sd,
 	struct imx219 *imx219 = to_imx219(sd);
 	const struct imx219_mode *mode;
 	int exposure_max, exposure_def, hblank;
+	struct v4l2_mbus_framefmt *format;
+
+	/*
+	 * The embedded data format follows the format on the image pads
+	 * and cannot be set directly.
+	 */
+	if (fmt->pad == IMX219_SINK_EMBEDDED_PAD) {
+		format = v4l2_subdev_get_pad_format(sd, sd_state,
+						    IMX219_SINK_EMBEDDED_PAD);
+		imx219_embedded_data_fmt(sd, sd_state, format);
+		fmt->format = *format;
+
+		return 0;
+	}
 
 	mode = v4l2_find_nearest_size(supported_modes,
 				      ARRAY_SIZE(supported_modes),
@@ -786,7 +877,26 @@ static int imx219_set_pad_format(struct v4l2_subdev *sd,
 					 hblank);
 	}
 
-	*v4l2_subdev_get_pad_format(sd, sd_state, 0) = fmt->format;
+	/*
+	 * FIXME Setting format on source pad should be disabled: the format
+	 * should be propagated from the internal image sink pad to the source
+	 * pad. However, this would break existing applications that assume
+	 * pad#0 is the only existing pad. So for now, setting a format on the
+	 * sink or on the source pad is equivalent.
+	 */
+	format = v4l2_subdev_get_pad_format(sd, sd_state, IMX219_SOURCE_PAD);
+	*format = fmt->format;
+
+	format = v4l2_subdev_get_pad_format(sd, sd_state, IMX219_SINK_IMAGE_PAD);
+	*format = fmt->format;
+
+	/*
+	 * The embedded data format bit-depth depends on the image format
+	 * bit depth.
+	 */
+	format = v4l2_subdev_get_pad_format(sd, sd_state,
+					    IMX219_SINK_EMBEDDED_PAD);
+	imx219_embedded_data_fmt(sd, sd_state, format);
 
 	return 0;
 }
@@ -847,6 +957,10 @@ static int imx219_get_selection(struct v4l2_subdev *sd,
 				struct v4l2_subdev_state *sd_state,
 				struct v4l2_subdev_selection *sel)
 {
+	/* Disable selection API on the internal sink pads. */
+	if (sel->pad)
+		return -EINVAL;
+
 	switch (sel->target) {
 	case V4L2_SEL_TGT_CROP: {
 		sel->r = *v4l2_subdev_get_pad_crop(sd, sd_state, 0);
@@ -1398,10 +1512,18 @@ static int imx219_probe(struct i2c_client *client)
 			    V4L2_SUBDEV_FL_HAS_EVENTS;
 	imx219->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
 
-	/* Initialize source pad */
-	imx219->pad.flags = MEDIA_PAD_FL_SOURCE;
+	/*
+	 * Initialize pads: first pad is the external source pad, second and
+	 * third are the internal sink pads for image and metadata respectively
+	 */
+	imx219->pads[IMX219_SOURCE_PAD].flags = MEDIA_PAD_FL_SOURCE;
+	imx219->pads[IMX219_SINK_IMAGE_PAD].flags = MEDIA_PAD_FL_SINK
+						  | MEDIA_PAD_FL_INTERNAL;
+	imx219->pads[IMX219_SINK_EMBEDDED_PAD].flags = MEDIA_PAD_FL_SINK
+						     | MEDIA_PAD_FL_INTERNAL;
 
-	ret = media_entity_pads_init(&imx219->sd.entity, 1, &imx219->pad);
+	ret = media_entity_pads_init(&imx219->sd.entity, IMX219_PADS_NUM,
+				     imx219->pads);
 	if (ret) {
 		dev_err(dev, "failed to init entity pads: %d\n", ret);
 		goto error_handler_free;
