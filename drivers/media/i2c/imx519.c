@@ -1760,7 +1760,7 @@ static int imx519_check_hwcfg(struct device *dev)
 		return -EINVAL;
 	}
 
-	if (v4l2_fwnode_endpoint_alloc_parse(endpoint, &ep_cfg)) {
+	if (v4l2_fwnode_endpoint_alloc_parse(dev, endpoint, &ep_cfg)) {
 		dev_err(dev, "could not parse endpoint\n");
 		goto error_out;
 	}
